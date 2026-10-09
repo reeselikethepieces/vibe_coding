@@ -1,0 +1,8 @@
+name: bam-errors
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=
+  - samtools
