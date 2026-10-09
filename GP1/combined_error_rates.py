@@ -1,4 +1,3 @@
-# BAM to SAM
 import argparse
 import csv
 from pathlib import Path
@@ -107,7 +106,8 @@ for bam in bam_paths:
 
 # determine where converted SAM files will go
 sam_dir   = Path(args.sam_dir).expanduser().resolve()
-sam_paths = ([Path(args.output).expanduser().resolve()] if args.output
+sam_paths = ([Path(args.output).expanduser().resolve()]
+			if args.output
 			else [sam_dir / (bam.stem + ".sam") for bam in bam_paths])
 tsv_path  = Path(args.tsv).expanduser().resolve()
 all_paths = bam_paths + sam_paths + [tsv_path]
@@ -116,11 +116,8 @@ if len(set(all_paths)) != len(all_paths):
 	parser.error("All input and output paths must be different; BAMs also need distinct names")
 sam_dir.mkdir(parents=True, exist_ok=True)
 
-///// pick up here
-
 # read SAM files and skip unmapped, secondary, and supplementary alignments
 primary_count = 0
-
 BASES = "ACGT"
 
 # list comprehension
@@ -135,63 +132,75 @@ substitution_types = [
 reference_counts = {base:0 for base in BASES}
 substitution_counts = {pair: 0 for pair in substitution_types}
 
-with open(args.output, "r") as sam_file:
-	for line in sam_file:
-		# skips header lines
-		if line.startswith("@"):
-			continue
+# shared counters above this loop accumulate counts from every BAM
+for bam_path, sam_path in zip(bam_paths, sam_paths):
+	subprocess.run(
+		["samtools", "view", "-h", "-o", str(sam_path), str(bam_path)],
+		check=True
+	)
+	file_primary_count = 0
+	with open(sam_path, "r") as sam_file:
+		for line in sam_file:
+			# skips header lines
+			if line.startswith("@"):
+				continue
 		
-		fields = line.rstrip("\n").split("\t")
-		flag = int(fields[1])
+			fields = line.rstrip("\n").split("\t")
+			flag = int(fields[1])
 		
-		# skip unmapped, secondary, or supp aligns
-		if flag & (0x4 | 0x100 | 0x800):
-			continue
+			# skip unmapped, secondary, or supp aligns
+			if flag & (0x4 | 0x100 | 0x800):
+				continue
 		
-		primary_count += 1
-
-# print(f"Primary mapped alignments: {primary_count}")
-# can check above value by using 'samtools view -c -F 2308 file.ext'
-
-		cigar = fields[5] 		# alignment structure column in SAM file
-		seq = fields[9] 	# read bases column in SAM file
+			primary_count += 1
+			file_primary_count += 1
+			cigar = fields[5] 		# alignment structure column in SAM file
+			seq = fields[9] 	# read bases column in SAM file
 
 		# md tags
-		md = None
-		for tag in fields[11:]:
-			if tag.startswith("MD:Z:"):
-				md = tag[5:]	# removes MD:Z:
-				break
+			md = None
+			for tag in fields[11:]:
+				if tag.startswith("MD:Z:"):
+					md = tag[5:]	# removes MD:Z:
+					break
 		
-		if md is None:
-			raise ValueError(f"Read {fields[0]} is missing an MD tag")
+			if md is None:
+				raise ValueError(f"Read {fields[0]} is missing an MD tag")
 
-		base_pairs = get_base_pairs(seq, cigar, md)
+			base_pairs = get_base_pairs(seq, cigar, md)
 		
-		for reference_base, read_base in base_pairs:
-			reference_counts[reference_base] += 1
+			for reference_base, read_base in base_pairs:
+				reference_counts[reference_base] += 1
 			
-			if reference_base != read_base:
-				substitution_counts[(reference_base, read_base)] += 1
+				if reference_base != read_base:
+					substitution_counts[(reference_base, read_base)] += 1
 		# above is crucial because we consider all evaluated pairs as part of the total
+	print(f"{bam_path.name}: {file_primary_count} primary mapped alignments")
 
+print(f"Primary mapped alignments: {primary_count}")
+
+# these are pooled counts divided by pooled ref totals not average of rates
 rates = []
 
 for ref, read in substitution_types:
 	total = reference_counts[ref]
-	
 	if total > 0:
 		rate = substitution_counts[(ref, read)] / total
 		rates.append(f"{rate:.12g}")
 	else:
 		rates.append("NA")
 
+rate_lookup = dict(zip(substitution_types, rates))
+
 with open(args.tsv, "w", newline="") as tsv_file:
 	writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
+	writer.writerow(["reference/read"] + list(BASES))
 	
-	writer.writerow(
-		["bam"] + [f"{ref}_to_{read}" for ref, read in substitution_types]
-	)
-	writer.writerow([args.bam] + rates)
+	for ref in BASES:
+		row = [
+			"-" if ref == read else rate_lookup[(ref,read)]
+			for read in BASES
+		] 
+		writer.writerow([ref] + row)
 
-print(f"Substitution rates written to: {args.tsv}")
+print(f"Substitution matrix written to: {args.tsv}")
